@@ -12,8 +12,6 @@ const WORKPLACE_OPTIONS = [
   { id: 'onsite', label: 'On-site' },
 ];
 const STAGE_TEXT = {
-  opening: 'Opening Job Site in a new tab…',
-  verifying: 'Job Site is showing a security check. Complete it in the new tab if asked…',
   searching: 'Searching…',
   collecting: 'Collecting jobs…',
 };
@@ -119,7 +117,7 @@ export default function Home() {
 
     setLoading(true);
     setSeconds(0);
-    setProgress({ stage: 'opening' });
+    setProgress({ stage: 'searching' });
     timer.current = setInterval(() => setSeconds((n) => n + 1), 1000);
     try {
       // With a location/workplace filter many jobs are dropped, so scan more than we show.
@@ -169,7 +167,7 @@ export default function Home() {
             <li>Click <em>Load unpacked</em> and select the <code>extension</code> folder.</li>
             <li>Reload this page.</li>
           </ol>
-          <p>Searches run in your own browser, so Job Site sees a normal visitor. A tab opens briefly and closes when done.</p>
+          <p>Searches run quietly in the background of your own browser; no tabs or windows are opened.</p>
         </section>
       )}
 
@@ -238,7 +236,7 @@ export default function Home() {
           <strong>Search failed:</strong> {error.message}
           {error.diagnostics && (
             <details>
-              <summary>What the browser tab showed</summary>
+              <summary>Details</summary>
               <pre>{JSON.stringify(error.diagnostics, null, 2)}</pre>
             </details>
           )}

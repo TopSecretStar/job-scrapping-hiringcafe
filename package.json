@@ -1,0 +1,28 @@
+{
+  "name": "job-scrapper",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "scrape": "node src/cli.js",
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@sparticuz/chromium": "^153.0.0",
+    "next": "^16.4.5",
+    "playwright-core": "^1.65.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

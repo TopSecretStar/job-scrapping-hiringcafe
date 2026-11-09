@@ -35,6 +35,7 @@ export async function GET(req) {
       includeWorldwide,
       maxJobs: max,
       timeBudgetMs: (maxDuration - 18) * 1000,
+      screenshotOnError: debug,
     });
     const body = {
       query: q,
@@ -52,6 +53,9 @@ export async function GET(req) {
     return NextResponse.json({ ...body, cached: false });
   } catch (err) {
     console.error('[api/jobs]', err);
-    return NextResponse.json({ error: err.message || 'Scrape failed' }, { status: 500 });
+    return NextResponse.json(
+      { error: err.message || 'Scrape failed', ...(err.diagnostics ? { diagnostics: err.diagnostics } : {}) },
+      { status: err.diagnostics?.blockedByCloudflare ? 502 : 500 }
+    );
   }
 }

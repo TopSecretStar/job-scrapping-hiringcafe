@@ -43,7 +43,7 @@ export default function Home() {
   const [max, setMax] = useState(50);
   const [loading, setLoading] = useState(false);
   const [seconds, setSeconds] = useState(0);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const [filter, setFilter] = useState('');
   const [recent, setRecent] = useState([]);
@@ -71,7 +71,7 @@ export default function Home() {
     setWorkplace(s.workplace || []);
     setWorldwide(s.worldwide ?? true);
     setLoading(true);
-    setError('');
+    setError(null);
     setResult(null);
     setFilter('');
     setSeconds(0);
@@ -82,11 +82,11 @@ export default function Home() {
       if (s.workplace?.length) params.set('workplace', s.workplace.join(','));
       const res = await fetch(`/api/jobs?${params}`);
       const data = await res.json().catch(() => ({ error: `Server returned ${res.status}` }));
-      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+      if (!res.ok) throw Object.assign(new Error(data.error || `Request failed (${res.status})`), { diagnostics: data.diagnostics });
       setResult(data);
       remember({ q, location: s.location?.trim() || '', workplace: s.workplace || [], worldwide: s.worldwide ?? true });
     } catch (e) {
-      setError(e.message);
+      setError({ message: e.message, diagnostics: e.diagnostics });
     } finally {
       clearInterval(timer.current);
       setLoading(false);
@@ -169,7 +169,18 @@ export default function Home() {
         </div>
       )}
 
-      {error && <div className="error"><strong>Search failed:</strong> {error}</div>}
+      {error && (
+        <div className="error">
+          <strong>Search failed:</strong> {error.message}
+          {error.diagnostics && (
+            <details>
+              <summary>What the server&apos;s browser saw</summary>
+              <pre>{JSON.stringify({ ...error.diagnostics, screenshot: error.diagnostics.screenshot ? '(below)' : undefined }, null, 2)}</pre>
+              {error.diagnostics.screenshot && <img src={error.diagnostics.screenshot} alt="Server browser screenshot" />}
+            </details>
+          )}
+        </div>
+      )}
 
       {loading && (
         <>

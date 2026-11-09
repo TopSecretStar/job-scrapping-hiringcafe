@@ -90,6 +90,10 @@ button:disabled { opacity: 0.6; cursor: progress; }
 
 .status { margin: 24px 0 12px; color: var(--muted); font-size: 14px; }
 .error { background: var(--danger-bg); color: var(--danger); padding: 12px 14px; border-radius: var(--radius); margin: 24px 0; }
+.error details { margin-top: 8px; color: var(--text); }
+.error summary { cursor: pointer; color: var(--danger); }
+.error pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 320px; overflow: auto; background: var(--surface); padding: 10px; border-radius: 8px; }
+.error img { max-width: 100%; border-radius: 8px; border: 1px solid var(--border); margin-top: 8px; }
 
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
 .toolbar input { flex: 1 1 220px; background: var(--surface); }

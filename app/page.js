@@ -29,6 +29,23 @@ function download(name, content, type) {
   URL.revokeObjectURL(url);
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Shape a stored search record for display. */
+function toResult(s) {
+  return {
+    id: s.id,
+    query: s.params.q,
+    filter: s.meta?.filter ?? null,
+    count: s.jobs?.length ?? 0,
+    scanned: s.meta?.scanned ?? 0,
+    durationMs: s.meta?.durationMs ?? 0,
+    source: s.meta?.source,
+    cached: !!s.reused,
+    jobs: s.jobs ?? [],
+  };
+}
+
 function formatDate(v) {
   if (!v) return null;
   const d = new Date(v);
@@ -47,10 +64,35 @@ export default function Home() {
   const [result, setResult] = useState(null);
   const [filter, setFilter] = useState('');
   const [recent, setRecent] = useState([]);
+  const [phase, setPhase] = useState(''); // queued | running
+  const [worker, setWorker] = useState(null); // { online, lastSeen } | null while unknown
   const timer = useRef(null);
+  const runId = useRef(0);
 
   useEffect(() => {
     try { setRecent(JSON.parse(localStorage.getItem(RECENT_KEY)) || []); } catch {}
+    // Open a shared search link: /?s=<id>
+    const id = new URLSearchParams(window.location.search).get('s');
+    if (id) {
+      fetch(`/api/searches/${encodeURIComponent(id)}`)
+        .then((r) => r.json())
+        .then((s) => {
+          if (s.status === 'done') {
+            setQuery(s.params.q);
+            setLocation(s.params.location);
+            setWorkplace(s.params.workplace);
+            setWorldwide(s.params.worldwide);
+            setResult(toResult(s));
+          }
+        })
+        .catch(() => {});
+    }
+    // Worker online indicator.
+    const check = () =>
+      fetch('/api/status').then((r) => r.json()).then((d) => setWorker(d.worker ?? { online: false })).catch(() => {});
+    check();
+    const t = setInterval(check, 15000);
+    return () => clearInterval(t);
   }, []);
 
   function remember(s) {
@@ -75,21 +117,44 @@ export default function Home() {
     setResult(null);
     setFilter('');
     setSeconds(0);
+    setPhase('queued');
     timer.current = setInterval(() => setSeconds((s) => s + 1), 1000);
+    const myRun = ++runId.current;
     try {
-      const params = new URLSearchParams({ q, max: String(max), worldwide: s.worldwide === false ? '0' : '1' });
-      if (s.location?.trim()) params.set('location', s.location.trim());
-      if (s.workplace?.length) params.set('workplace', s.workplace.join(','));
-      const res = await fetch(`/api/jobs?${params}`);
-      const data = await res.json().catch(() => ({ error: `Server returned ${res.status}` }));
-      if (!res.ok) throw Object.assign(new Error(data.error || `Request failed (${res.status})`), { diagnostics: data.diagnostics });
-      setResult(data);
+      const res = await fetch('/api/searches', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ q, location: s.location?.trim() || '', workplace: s.workplace || [], worldwide: s.worldwide ?? true, max }),
+      });
+      let search = await res.json().catch(() => ({ error: `Server returned ${res.status}` }));
+      if (!res.ok) throw new Error(search.error || `Request failed (${res.status})`);
+      const reused = !!search.reused;
+
+      // Poll until the local worker has finished (up to 10 minutes).
+      const deadline = Date.now() + 10 * 60 * 1000;
+      while (search.status === 'queued' || search.status === 'running') {
+        if (myRun !== runId.current) return; // a newer search replaced this one
+        if (Date.now() > deadline) throw new Error('Timed out waiting for the scraper worker. Is `npm run worker` running?');
+        setPhase(search.status);
+        await sleep(2000);
+        const r = await fetch(`/api/searches/${search.id}`);
+        search = await r.json();
+        if (!r.ok) throw new Error(search.error || `Request failed (${r.status})`);
+      }
+      if (search.status === 'failed') {
+        throw Object.assign(new Error(search.error || 'Search failed'), { diagnostics: search.diagnostics });
+      }
+      setResult(toResult({ ...search, reused }));
+      window.history.replaceState(null, '', `?s=${search.id}`);
       remember({ q, location: s.location?.trim() || '', workplace: s.workplace || [], worldwide: s.worldwide ?? true });
     } catch (e) {
       setError({ message: e.message, diagnostics: e.diagnostics });
     } finally {
-      clearInterval(timer.current);
-      setLoading(false);
+      if (myRun === runId.current) {
+        clearInterval(timer.current);
+        setLoading(false);
+        setPhase('');
+      }
     }
   }
 
@@ -107,6 +172,12 @@ export default function Home() {
       <header>
         <h1>Job Scrapper</h1>
         <p>Search Jobs and export the results.</p>
+        {worker && (
+          <p className={`worker ${worker.online ? 'online' : 'offline'}`}>
+            <span className="dot" />
+            {worker.online ? 'Scraper online' : 'Scraper offline: searches will wait until `npm run worker` is running'}
+          </p>
+        )}
       </header>
 
       <form className="search" onSubmit={(e) => { e.preventDefault(); search(); }}>
@@ -174,7 +245,7 @@ export default function Home() {
           <strong>Search failed:</strong> {error.message}
           {error.diagnostics && (
             <details>
-              <summary>What the server&apos;s browser saw</summary>
+              <summary>What the scraper&apos;s browser saw</summary>
               <pre>{JSON.stringify({ ...error.diagnostics, screenshot: error.diagnostics.screenshot ? '(below)' : undefined }, null, 2)}</pre>
               {error.diagnostics.screenshot && <img src={error.diagnostics.screenshot} alt="Server browser screenshot" />}
             </details>
@@ -184,7 +255,13 @@ export default function Home() {
 
       {loading && (
         <>
-          <p className="status">Opening hiringcafe.com and collecting jobs… {seconds}s (this usually takes 15–45s)</p>
+          <p className="status">
+            {phase === 'running'
+              ? `Opening Job Site and collecting jobs… ${seconds}s (this usually takes 15–60s)`
+              : worker && !worker.online
+                ? `Queued… ${seconds}s. The scraper is offline; start it with \`npm run worker\`.`
+                : `Queued, waiting for the scraper… ${seconds}s`}
+          </p>
           <div className="list">{[0, 1, 2, 3].map((i) => <div key={i} className="skeleton" />)}</div>
         </>
       )}

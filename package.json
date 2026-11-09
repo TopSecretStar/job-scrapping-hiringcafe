@@ -6,15 +6,13 @@
     "scrape": "node src/cli.js",
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "worker": "node src/worker.js"
+    "start": "next start"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@upstash/redis": "^1.41.0",
     "next": "^16.4.5",
     "playwright-core": "^1.65.0",
     "react": "^19.3.1",

@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Job Scrapper Helper",
+  "version": "1.0.0",
+  "description": "Lets the Job Scrapper website search hiringcafe.com using your own browser.",
+  "minimum_chrome_version": "111",
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": ["https://hiringcafe.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://job-scrapping-nine.vercel.app/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://hiringcafe.com/*"],
+      "js": ["capture.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}

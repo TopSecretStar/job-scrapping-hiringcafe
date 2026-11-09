@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { buildResults } from '../lib/results.js';
+import { toCsv } from '../lib/parse.js';
 
 const RECENT_KEY = 'job-scrapper:recent:v2';
 const REGION_SUGGESTIONS = ['Europe', 'United Kingdom', 'North America', 'Latin America', 'Asia Pacific', 'Middle East & Africa', 'Germany', 'Netherlands', 'Spain', 'Poland'];
@@ -9,18 +11,14 @@ const WORKPLACE_OPTIONS = [
   { id: 'hybrid', label: 'Hybrid' },
   { id: 'onsite', label: 'On-site' },
 ];
+const STAGE_TEXT = {
+  opening: 'Opening Job Site in a new tab…',
+  verifying: 'Job Site is showing a security check. Complete it in the new tab if asked…',
+  searching: 'Searching…',
+  collecting: 'Collecting jobs…',
+};
 
 const describe = (s) => [s.q, s.location, s.workplace?.join('/')].filter(Boolean).join(' · ');
-
-function toCsv(jobs) {
-  if (!jobs.length) return '';
-  const cols = [...new Set(jobs.flatMap(Object.keys))];
-  const esc = (v) => {
-    const s = v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  return [cols.join(','), ...jobs.map((j) => cols.map((c) => esc(j[c])).join(','))].join('\n');
-}
 
 function download(name, content, type) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -29,27 +27,33 @@ function download(name, content, type) {
   URL.revokeObjectURL(url);
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** Shape a stored search record for display. */
-function toResult(s) {
-  return {
-    id: s.id,
-    query: s.params.q,
-    filter: s.meta?.filter ?? null,
-    count: s.jobs?.length ?? 0,
-    scanned: s.meta?.scanned ?? 0,
-    durationMs: s.meta?.durationMs ?? 0,
-    source: s.meta?.source,
-    cached: !!s.reused,
-    jobs: s.jobs ?? [],
-  };
-}
-
 function formatDate(v) {
   if (!v) return null;
   const d = new Date(v);
-  return isNaN(d) ? String(v) : d.toLocaleDateString();
+  if (isNaN(d)) return String(v);
+  // Date-only values ("2026-11-01") are UTC midnight; don't shift them a day in other time zones.
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? d.toLocaleDateString(undefined, { timeZone: 'UTC' }) : d.toLocaleDateString();
+}
+
+/** Ask the browser extension to run a search; resolves with the collected raw data. */
+function runInExtension(params, onProgress, timeoutMs = 3 * 60 * 1000) {
+  return new Promise((resolve, reject) => {
+    const id = crypto.randomUUID();
+    const cleanup = () => {
+      window.removeEventListener('message', onMessage);
+      clearTimeout(timer);
+    };
+    const onMessage = (e) => {
+      if (e.source !== window || e.data?.source !== 'job-scrapper-ext' || e.data.id !== id) return;
+      const m = e.data;
+      if (m.type === 'progress') onProgress(m);
+      if (m.type === 'result') { cleanup(); resolve(m); }
+      if (m.type === 'error') { cleanup(); reject(Object.assign(new Error(m.error), { diagnostics: m.diagnostics })); }
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('The extension did not respond in time.')); }, timeoutMs);
+    window.addEventListener('message', onMessage);
+    window.postMessage({ source: 'job-scrapper-page', type: 'search', id, params }, window.location.origin);
+  });
 }
 
 export default function Home() {
@@ -60,39 +64,28 @@ export default function Home() {
   const [max, setMax] = useState(50);
   const [loading, setLoading] = useState(false);
   const [seconds, setSeconds] = useState(0);
+  const [progress, setProgress] = useState(null);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const [filter, setFilter] = useState('');
   const [recent, setRecent] = useState([]);
-  const [phase, setPhase] = useState(''); // queued | running
-  const [worker, setWorker] = useState(null); // { online, lastSeen } | null while unknown
+  const [ext, setExt] = useState(null); // null = checking, false = missing, { version } = installed
   const timer = useRef(null);
-  const runId = useRef(0);
 
   useEffect(() => {
     try { setRecent(JSON.parse(localStorage.getItem(RECENT_KEY)) || []); } catch {}
-    // Open a shared search link: /?s=<id>
-    const id = new URLSearchParams(window.location.search).get('s');
-    if (id) {
-      fetch(`/api/searches/${encodeURIComponent(id)}`)
-        .then((r) => r.json())
-        .then((s) => {
-          if (s.status === 'done') {
-            setQuery(s.params.q);
-            setLocation(s.params.location);
-            setWorkplace(s.params.workplace);
-            setWorldwide(s.params.worldwide);
-            setResult(toResult(s));
-          }
-        })
-        .catch(() => {});
-    }
-    // Worker online indicator.
-    const check = () =>
-      fetch('/api/status').then((r) => r.json()).then((d) => setWorker(d.worker ?? { online: false })).catch(() => {});
-    check();
-    const t = setInterval(check, 15000);
-    return () => clearInterval(t);
+
+    // Detect the browser extension.
+    const onMessage = (e) => {
+      if (e.source === window && e.data?.source === 'job-scrapper-ext' && e.data.type === 'ready') setExt({ version: e.data.version });
+    };
+    window.addEventListener('message', onMessage);
+    window.postMessage({ source: 'job-scrapper-page', type: 'ping' }, window.location.origin);
+    const t = setTimeout(() => setExt((v) => v ?? false), 1500);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      clearTimeout(t);
+    };
   }, []);
 
   function remember(s) {
@@ -108,53 +101,40 @@ export default function Home() {
   async function search(s = { q: query, location, workplace, worldwide }) {
     const q = s.q.trim();
     if (!q || loading) return;
+    const loc = s.location?.trim() || '';
+    const wp = s.workplace || [];
+    const ww = s.worldwide ?? true;
     setQuery(q);
-    setLocation(s.location || '');
-    setWorkplace(s.workplace || []);
-    setWorldwide(s.worldwide ?? true);
-    setLoading(true);
+    setLocation(loc);
+    setWorkplace(wp);
+    setWorldwide(ww);
     setError(null);
     setResult(null);
     setFilter('');
-    setSeconds(0);
-    setPhase('queued');
-    timer.current = setInterval(() => setSeconds((s) => s + 1), 1000);
-    const myRun = ++runId.current;
-    try {
-      const res = await fetch('/api/searches', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ q, location: s.location?.trim() || '', workplace: s.workplace || [], worldwide: s.worldwide ?? true, max }),
-      });
-      let search = await res.json().catch(() => ({ error: `Server returned ${res.status}` }));
-      if (!res.ok) throw new Error(search.error || `Request failed (${res.status})`);
-      const reused = !!search.reused;
 
-      // Poll until the local worker has finished (up to 10 minutes).
-      const deadline = Date.now() + 10 * 60 * 1000;
-      while (search.status === 'queued' || search.status === 'running') {
-        if (myRun !== runId.current) return; // a newer search replaced this one
-        if (Date.now() > deadline) throw new Error('Timed out waiting for the scraper worker. Is `npm run worker` running?');
-        setPhase(search.status);
-        await sleep(2000);
-        const r = await fetch(`/api/searches/${search.id}`);
-        search = await r.json();
-        if (!r.ok) throw new Error(search.error || `Request failed (${r.status})`);
-      }
-      if (search.status === 'failed') {
-        throw Object.assign(new Error(search.error || 'Search failed'), { diagnostics: search.diagnostics });
-      }
-      setResult(toResult({ ...search, reused }));
-      window.history.replaceState(null, '', `?s=${search.id}`);
-      remember({ q, location: s.location?.trim() || '', workplace: s.workplace || [], worldwide: s.worldwide ?? true });
+    if (!ext) {
+      setError({ message: 'The Job Scrapper Helper extension is not installed or not enabled for this site. See the setup steps above.' });
+      return;
+    }
+
+    setLoading(true);
+    setSeconds(0);
+    setProgress({ stage: 'opening' });
+    timer.current = setInterval(() => setSeconds((n) => n + 1), 1000);
+    try {
+      // With a location/workplace filter many jobs are dropped, so scan more than we show.
+      const filtered = Boolean(loc || wp.length);
+      const scanTarget = filtered ? Math.min(max * 5, 800) : max;
+      const collected = await runInExtension({ q, scanTarget }, setProgress);
+      const built = buildResults(collected, { location: loc, workplaceTypes: wp, includeWorldwide: ww, max });
+      setResult({ ...built, query: q, durationMs: collected.meta?.durationMs ?? 0, source: collected.meta?.source, debug: { ...collected.meta, sampleRawJob: collected.rawJobs?.[0] ?? null } });
+      remember({ q, location: loc, workplace: wp, worldwide: ww });
     } catch (e) {
       setError({ message: e.message, diagnostics: e.diagnostics });
     } finally {
-      if (myRun === runId.current) {
-        clearInterval(timer.current);
-        setLoading(false);
-        setPhase('');
-      }
+      clearInterval(timer.current);
+      setLoading(false);
+      setProgress(null);
     }
   }
 
@@ -172,13 +152,26 @@ export default function Home() {
       <header>
         <h1>Job Scrapper</h1>
         <p>Search Jobs and export the results.</p>
-        {worker && (
-          <p className={`worker ${worker.online ? 'online' : 'offline'}`}>
+        {ext !== null && (
+          <p className={`worker ${ext ? 'online' : 'offline'}`}>
             <span className="dot" />
-            {worker.online ? 'Scraper online' : 'Scraper offline: searches will wait until `npm run worker` is running'}
+            {ext ? `Browser extension connected (v${ext.version})` : 'Browser extension not detected'}
           </p>
         )}
       </header>
+
+      {ext === false && (
+        <section className="setup">
+          <strong>One-time setup: install the Job Scrapper Helper extension</strong>
+          <ol>
+            <li>Download or clone this project and find its <code>extension</code> folder.</li>
+            <li>In Chrome or Edge, open <code>chrome://extensions</code> and turn on <em>Developer mode</em>.</li>
+            <li>Click <em>Load unpacked</em> and select the <code>extension</code> folder.</li>
+            <li>Reload this page.</li>
+          </ol>
+          <p>Searches run in your own browser, so Job Site sees a normal visitor. A tab opens briefly and closes when done.</p>
+        </section>
+      )}
 
       <form className="search" onSubmit={(e) => { e.preventDefault(); search(); }}>
         <div className="row">
@@ -245,9 +238,8 @@ export default function Home() {
           <strong>Search failed:</strong> {error.message}
           {error.diagnostics && (
             <details>
-              <summary>What the scraper&apos;s browser saw</summary>
-              <pre>{JSON.stringify({ ...error.diagnostics, screenshot: error.diagnostics.screenshot ? '(below)' : undefined }, null, 2)}</pre>
-              {error.diagnostics.screenshot && <img src={error.diagnostics.screenshot} alt="Server browser screenshot" />}
+              <summary>What the browser tab showed</summary>
+              <pre>{JSON.stringify(error.diagnostics, null, 2)}</pre>
             </details>
           )}
         </div>
@@ -256,11 +248,8 @@ export default function Home() {
       {loading && (
         <>
           <p className="status">
-            {phase === 'running'
-              ? `Opening Job Site and collecting jobs… ${seconds}s (this usually takes 15–60s)`
-              : worker && !worker.online
-                ? `Queued… ${seconds}s. The scraper is offline; start it with \`npm run worker\`.`
-                : `Queued, waiting for the scraper… ${seconds}s`}
+            {STAGE_TEXT[progress?.stage] || 'Working…'}
+            {progress?.stage === 'collecting' && progress.scanned ? ` ${progress.scanned} scanned` : ''} · {seconds}s
           </p>
           <div className="list">{[0, 1, 2, 3].map((i) => <div key={i} className="skeleton" />)}</div>
         </>
@@ -270,11 +259,11 @@ export default function Home() {
         <>
           <p className="status">
             {result.count} jobs for “{result.query}”
-            {result.filter && (result.filter.places.length || result.filter.workplaceTypes.length)
+            {result.filterActive
               ? ` in ${[result.filter.places.join(', '), result.filter.workplaceTypes.join('/')].filter(Boolean).join(' · ')} (${result.scanned} scanned)`
               : ''}
             {' · '}{(result.durationMs / 1000).toFixed(1)}s
-            {result.cached ? ' · cached' : ''}{result.source === 'dom' ? ' · read from page' : ''}
+            {result.source === 'dom' ? ' · read from page' : ''}
           </p>
 
           {result.count > 0 ? (
@@ -307,6 +296,11 @@ export default function Home() {
               No jobs found{result.scanned ? ` among ${result.scanned} scanned` : ''}. Try a broader location or a different keyword.
             </p>
           )}
+
+          <details className="debug">
+            <summary>Debug info</summary>
+            <pre>{JSON.stringify(result.debug, null, 2)}</pre>
+          </details>
         </>
       )}
     </main>

@@ -1,6 +1,7 @@
 /** @type {import('next').NextConfig} */
-// The website only queues searches and shows results; scraping runs in the local worker
-// (src/worker.js), so no browser is bundled into the Vercel functions.
-const nextConfig = {};
+// Runs locally only (npm run dev / npm start): the API route drives a Chromium window on this PC.
+const nextConfig = {
+  serverExternalPackages: ['playwright'],
+};
 
 export default nextConfig;

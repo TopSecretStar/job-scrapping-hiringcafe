@@ -4,3 +4,4 @@ output/
 .vercel/
 .env
 .env.local
+.browser-profile/
